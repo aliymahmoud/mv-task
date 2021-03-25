@@ -4,7 +4,6 @@ namespace App\Http\Controllers\API;
 
 use App\Http\Controllers\Controller;
 use Illuminate\Http\Request;
-use Illuminate\Support\Facades\Validator;
 use App\Models\Category;
 use App\Models\Subcategory;
 use App\Models\Article;
@@ -12,24 +11,33 @@ use App\Models\ArticleCategory;
 use App\Models\ArticleSubcategory;
 use App\Models\Hashtag;
 use App\Models\ArticleHashtag;
-use Illuminate\Validation\Rule;
-
+use Illuminate\Database\Eloquent\Builder;
 class ApiController extends Controller
 {
+    
     // store a category into database, requires a name that hasn't been taken by another
     //  category before
     public function store_category(Request $request)
     {
-        $validation = Validator::make($request->all(),[
-            'name' => 'required|unique:categories,name|alpha',
-        ]);
-        if($validation->fails()){
+        $rootCheck = Category::get();
+        if ($rootCheck->isEmpty()) {
             return response()->json([
-                "message" => $validation->errors()->first('name'),
+                'message' => "something wrong happened, please communicate with the developer",
+                'code' => '412',
             ]);
         }
+        $rules = [
+            'name' => 'required|unique:categories,name|alpha',
+            'category_id' => 'required|exists:categories,id',
+        ];
+        $validation = $this->apiValidate($request, $rules);
+        if($validation){
+            return $validation;
+        }
+
         $category = Category::create([
             "name" => $request->name,
+            "category_id" => $request->category_id,
         ]);
         if($category){
             return response()->json([
@@ -43,16 +51,15 @@ class ApiController extends Controller
     // id so that the subcategory assigned to a category
     public function store_subcategory(Request $request)
     {
-        $validation = Validator::make($request->all(),[
+        $rules = [
             'category_id' => 'required|numeric|exists:categories,id',
             'name' => 'required|unique:subcategories,name|alpha|'.Rule::notIn(Category::where('id', $request->category_id)->pluck('name')->toArray()),
-        ]);
-        
-        if($validation->fails()){
-            return response()->json([
-                "message" => $validation->errors()->first(),
-            ]);
+        ];
+        $validation = $this->apiValidate($request, $rules);
+        if($validation){
+            return $validation;
         }
+
         $subcategory = Subcategory::create([
             "category_id" => $request->category_id,
             "name" => $request->name,
@@ -66,6 +73,64 @@ class ApiController extends Controller
 
     }
 
+    // auxillary function to detect new hashtags then insert them in database 
+    public function insertNewHashtags($body)
+    {
+        preg_match_all("/#(\\w+)/", $body, $matches);
+        $article_hashtags = $matches[0];
+        $article_hashtags = array_unique($article_hashtags);
+        $hashtagsQuery = Hashtag::whereIn('title', $article_hashtags);
+        $hashtagsTitle = $hashtagsQuery->pluck('title')->toArray();
+        $hashtag_diff = array_diff($article_hashtags, $hashtagsTitle);
+        if($hashtag_diff){
+            $newTags = [];
+            foreach ($hashtag_diff as $key => $hashtag) {
+                $newTags[$key] = [
+                    'title' => $hashtag,
+                    'created_at' => now(),
+                    'updated_at' => now(),
+                ];
+            }
+            Hashtag::insert($newTags);
+        }
+        $hashtags = Hashtag::whereIn('title', $article_hashtags)->get();
+        return ($hashtags)? : null;
+    }
+
+    // auxillary function to update existing article's hashtags
+    public function updateExistingHashtags($body, $article_id)
+    {
+        preg_match_all("/#(\\w+)/", $body, $matches);
+        $article_hashtags = $matches[0];
+        $article_hashtags = array_unique($article_hashtags);
+        $hashtagsQuery = Article::find($article_id)->hashtags;
+        $existingTags = $hashtagsQuery->pluck('title')->toArray();
+        $newTags = array_diff($article_hashtags, $existingTags);
+        $oldTags = array_diff($existingTags, $article_hashtags);
+        if($newTags){
+            $allHashtagsQuery = Hashtag::whereIn('title', $article_hashtags);
+            $hashtagsTitle = $allHashtagsQuery->pluck('title')->toArray();
+            $hashtag_diff = array_diff($newTags, $hashtagsTitle);
+            if($hashtag_diff){
+                $tags = [];
+                foreach ($hashtag_diff as $key => $hashtag) {
+                    $tags[$key] = [
+                        'title' => $hashtag,
+                        'created_at' => now(),
+                        'updated_at' => now(),
+                    ];
+                }
+                Hashtag::insert($tags);
+            }
+        }
+        if($oldTags){
+            $oldTagsIds = Hashtag::whereIn('title', $oldTags)->pluck('id');
+            ArticleHashtag::where('article_id', $article_id)->whereIn('hashtag_id', $oldTagsIds)->delete();
+        }
+        $hashtags = Hashtag::whereIn('title', $newTags)->get();
+        return ($hashtags)? $hashtags : null;
+    }
+
     // store article to database, requires a subcategory id that this article
     //  is assigned for, and from this subcategory id, the article is also 
     // assigned to its category, which means article is assigned to a category
@@ -74,39 +139,23 @@ class ApiController extends Controller
     //  many relationship
     public function store_article(Request $request)
     {
-        $validation = Validator::make($request->all(), [
-            "subcategory_id" => "required|numeric|exists:subcategories,id",
+        // 
+        $rules = [
+            "category_id" => "required|numeric|exists:categories,id",
             "title" => "required",
             "body" => "required",
-        ]);
-        if($validation->fails()){
-            return response()->json([
-                "message" => $validation->errors()->first(),
-            ]);
+        ];
+        $validation = $this->apiValidate($request, $rules);
+        if($validation){
+            return $validation;
         }
-        preg_match_all("/#(\\w+)/", $request->body, $matches);
-        $article_hashtags = $matches[0];
-        $hashtagsQuery = Hashtag::whereIn('title', $article_hashtags);
-        $hashtagsTitle = $hashtagsQuery->pluck('title')->toArray();
-        $hashtag_diff = array_diff($article_hashtags, $hashtagsTitle);
-        if($hashtag_diff){
-            $newtags = [];
-            foreach ($hashtag_diff as $key => $hashtag) {
-                $newtags[$key] = [
-                    'title' => $hashtag,
-                    'created_at' => now(),
-                    'updated_at' => now(),
-                ];
-            }
-            Hashtag::insert($newtags);
-        }
-        $hashtags = Hashtag::whereIn('title', $article_hashtags)->get();
-        $subcategory = Subcategory::find($request->subcategory_id);
-        $category = $subcategory->category;
+        // 
+        $category = Category::find($request->category_id);
         $article = Article::create([
             'title' => $request->title,
             'body' => $request->body,
         ]);
+        $hashtags = $this->insertNewHashtags($request->body);
         if($hashtags){
             $article_hashtag_data = [];
             foreach ($hashtags as $key => $hashtag) {
@@ -123,12 +172,8 @@ class ApiController extends Controller
             'article_id' => $article->id,
             'category_id' => $category->id,
         ]);
-        $articleSubcategory = ArticleSubcategory::create([
-            'article_id' => $article->id,
-            'subcategory_id' => $subcategory->id,
-        ]);
-        
-        if($article and $articleCategory and $articleSubcategory){
+        // 
+        if($article and $articleCategory){
             return response()->json([
                 'message' => "Article Created Successfully",
                 'code' => '200'
@@ -137,12 +182,20 @@ class ApiController extends Controller
     }
 
     // return all categories paginated with a tree view with its subcategories
-    public function get_categories()
+    public function get_categories(Request $request)
     {
-        $categories = Category::paginate(10);
-        foreach ($categories as $key => $category) {
-            $subcategory = $category->subcategories;
-            $categories[$key]['subcategories'] = $subcategory;
+        $rules = [
+            'category_id' => 'numeric|exists:categories,id',
+        ];
+        $validation = $this->apiValidate($request, $rules);
+        if($validation){
+            return $validation;
+        }
+        if($request->has('category_id')){
+            $categories = Category::where('id', $request->category_id)->with('children')->paginate(10);
+        }
+        else{
+            $categories = Category::where('category_id', 0)->with('children')->paginate(10);
         }
         return response()->json([
             "categories" => $categories,
@@ -153,22 +206,17 @@ class ApiController extends Controller
     // return articles for specific category or a subcategory or a specific hashtag
     public function get_articles(Request $request)
     {
-        $validation = Validator::make($request->all(), [
-            'category_id' => 'numeric',
-            'subcategory_id' => 'numeric',
+        $rules = [
+            'category_id' => 'numeric|exists:categories,id',
             'hashtag' => "regex:/\B(\#[a-zA-Z_0-9]+\b)(?!;)(?! )/|exists:hashtags,title",
-        ]);
-        if($validation->fails()){
-            return response()->json([
-                "message" => $validation->errors()->first(),
-            ]);
+        ];
+        $validation = $this->apiValidate($request, $rules);
+        if($validation){
+            return $validation;
         }
         $articles = Article::paginate('10');
         if($request->has('category_id')){
-            $articles = Category::find($request->category_id)->articles()->paginate('10');
-        }
-        if($request->has('subcategory_id')){
-            $articles = Subcategory::find($request->subcategory_id)->articles()->paginate('10');
+            $articles = Category::where('id', $request->category_id)->with('articles')->with('childrenHasArticles')->paginate('10');
         }
         if($request->has('hashtag')){
             $hashtag = Hashtag::where('title', $request->hashtag)->first();
@@ -186,17 +234,16 @@ class ApiController extends Controller
     public function update_article(Request $request)
     {
 
-        $validation = Validator::make($request->all(), [
+        $rules = [
             'article_id' => 'required|numeric|exists:articles,id',
             'title' => 'string',
             'body' => 'string'
-        ]);
-        if($validation->fails()){
-            return response()->json([
-                'message' => $validation->errors()->first(),
-            ]);
+        ];
+        $validation = $this->apiValidate($request, $rules);
+        if($validation){
+            return $validation;
         }
-        $article = Article::find($request->article_id)->first();
+        $article = Article::find($request->article_id);
         if($article){
             if($request->has('title')){
                 $article->update([
@@ -204,6 +251,19 @@ class ApiController extends Controller
                 ]);
             }
             if($request->has('body')){
+                $hashtags = $this->updateExistingHashtags($request->body, $request->article_id);
+                if($hashtags){
+                    $article_hashtag_data = [];
+                    foreach ($hashtags as $key => $hashtag) {
+                        $article_hashtag_data[$key] = [
+                            'hashtag_id' => $hashtag->id,
+                            'article_id' => $article->id,
+                            'created_at' => now(),
+                            'updated_at' => now(),
+                        ];
+                    }
+                    ArticleHashtag::insert($article_hashtag_data);
+                }
                 $article->update([
                     'body' => $request->body,
                 ]);

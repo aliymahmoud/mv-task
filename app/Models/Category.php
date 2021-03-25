@@ -11,13 +11,27 @@ class Category extends Model
 
     protected $guarded = [];
 
-    public function subcategories()
+    protected $hidden = [
+        'category_id',
+    ];
+
+    public function children()
     {
-        return $this->hasMany(Subcategory::class);
+        return $this->hasMany(Category::class, 'category_id')->with('children');
+    }
+
+    public function parent()
+    {
+        return $this->belongsTo(Category::class, 'category_id');
     }
 
     public function articles()
     {
         return $this->belongsToMany(Article::class, 'article_categories');
+    }
+
+    public function childrenHasArticles()
+    {
+        return $this->hasMany(Category::class, 'category_id')->has('articles')->with('articles')->with('childrenHasArticles');
     }
 }
