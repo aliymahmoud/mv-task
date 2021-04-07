@@ -13,6 +13,6 @@ class Hashtag extends Model
     
     public function articles()
     {
-        $this->belongsToMany(Article::class, 'article_hashtags');
+        return $this->belongsToMany(Article::class, 'article_hashtags');
     }
 }

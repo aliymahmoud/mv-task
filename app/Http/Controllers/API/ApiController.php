@@ -12,6 +12,7 @@ use App\Models\ArticleSubcategory;
 use App\Models\Hashtag;
 use App\Models\ArticleHashtag;
 use Illuminate\Database\Eloquent\Builder;
+use Illuminate\Support\Facades\DB;
 class ApiController extends Controller
 {
     
@@ -19,26 +20,23 @@ class ApiController extends Controller
     //  category before
     public function store_category(Request $request)
     {
-        $rootCheck = Category::get();
-        if ($rootCheck->isEmpty()) {
-            return response()->json([
-                'message' => "something wrong happened, please communicate with the developer",
-                'code' => '412',
-            ]);
-        }
         $rules = [
             'name' => 'required|unique:categories,name|alpha',
-            'category_id' => 'required|exists:categories,id',
+            'category_id' => 'exists:categories,id',
         ];
         $validation = $this->apiValidate($request, $rules);
         if($validation){
             return $validation;
         }
-
+        if(!$request->has('category_id')){
+            DB::statement('SET FOREIGN_KEY_CHECKS=0;');
+        }
+        $category_id = ($request->has('category_id'))? $request->category_id : 0;
         $category = Category::create([
             "name" => $request->name,
-            "category_id" => $request->category_id,
+            "category_id" => $category_id,
         ]);
+        DB::statement('SET FOREIGN_KEY_CHECKS=1;');
         if($category){
             return response()->json([
                 "message" => "Category Created Successfully",
@@ -209,14 +207,32 @@ class ApiController extends Controller
         $rules = [
             'category_id' => 'numeric|exists:categories,id',
             'hashtag' => "regex:/\B(\#[a-zA-Z_0-9]+\b)(?!;)(?! )/|exists:hashtags,title",
+            'view' => 'in:tree,list',
         ];
         $validation = $this->apiValidate($request, $rules);
         if($validation){
             return $validation;
         }
+        $view = ($request->has('view'))? $request->view : 'list';
         $articles = Article::paginate('10');
         if($request->has('category_id')){
-            $articles = Category::where('id', $request->category_id)->with('articles')->with('childrenHasArticles')->paginate('10');
+
+            if($view == 'tree'){
+                $articles = Category::where('id', $request->category_id)->with('articles')->with('childrenWithArticles')->paginate('10');
+            }
+            else {
+                $category = Category::where('id', $request->category_id)->first();
+                $categories_ids = [];
+                $categories_ids[] = $category->id; 
+                foreach($category->flat_children as $child){
+                    $categories_ids[] = $child->id;
+                }
+                // $articles = Article::whereHas('categories', function(Builder $query) use($categories_ids){
+                //     $query->whereIn('category_id', $categories_ids);
+                // })->get()
+                $articles_ids = ArticleCategory::whereIn('category_id', $categories_ids)->pluck('article_id');
+                $articles = Article::whereIn('id', $articles_ids)->paginate('10');
+            }
         }
         if($request->has('hashtag')){
             $hashtag = Hashtag::where('title', $request->hashtag)->first();
@@ -279,28 +295,33 @@ class ApiController extends Controller
     // all hashtags are returned
     public function trending_tags(Request $request)
     {
-        $hashtags = ArticleHashtag::all()->groupBy('hashtag_id');
-        $tagsNum = $hashtags->count();
-        $top = ($request->has('top'))? $request->top: $tagsNum;
-        ($top > $tagsNum)? $top = $tagsNum: '';
+        // $hashtags = ArticleHashtag::all()->groupBy('hashtag_id');
+        // $tagsNum = $hashtags->count();
+        // ($top > $tagsNum)? $top = $tagsNum: '';
+        // $top = ($request->has('top'))? $request->top : "";
+        $hashtags = Hashtag::withCount('articles')->get()->sortByDesc('articles_count');
+        if($request->has('top')){
+            $hashtags = $hashtags->take($request->top);
+        }
+        // return $hashtags;
         $trendings = [];
         foreach ($hashtags as $key => $value) {
-            $tempTag = Hashtag::find($key);
-            $tempTagNum = $value->count();
+            // $tempTag = Hashtag::find($key);
+            // $tempTagNum = $value->count();
             array_push($trendings, [
-                "hashtag" => $tempTag->title,
-                "trend" => $tempTagNum,
+                "hashtag" => $value->title,
+                "trend" => $value->articles_count,
             ]);
         }
-        $trend = array_column($trendings, 'trend');
-        array_multisort($trend, SORT_DESC, $trendings);
-        $orderedTrend = $trendings;
-        $final = [];
-        for ($i=0; $i < $top; $i++) { 
-            \array_push($final,$orderedTrend[$i]);
-        }
+        // $trend = array_column($trendings, 'trend');
+        // array_multisort($trend, SORT_DESC, $trendings);
+        // $orderedTrend = $trendings;
+        // $final = [];
+        // for ($i=0; $i < $top; $i++) { 
+        //     \array_push($final,$orderedTrend[$i]);
+        // }
         return response()->json([
-            "top ten trending hashtags" => $final,
+            "top ten trending hashtags" => $trendings,
         ]);
     }
 }
